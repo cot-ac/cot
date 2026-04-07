@@ -1,0 +1,13 @@
+struct Rect {
+    w: i32
+    h: i32
+}
+
+fn area(r: Rect) -> i32 {
+    return r.w * r.h
+}
+
+fn main() -> i32 {
+    let r = Rect { w: 6, h: 7 }
+    return area(r)
+}

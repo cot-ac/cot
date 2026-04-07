@@ -1,0 +1,526 @@
+//===- Codegen.cpp - ac AST to CIR emission -------------------*- C++ -*-===//
+//
+// Zig AstGen pattern: single-pass recursive dispatch over AST nodes.
+// Emits CIR ops from cot-core, cot-memory, cot-flow, cot-structs, cot-arrays.
+//
+//===----------------------------------------------------------------------===//
+#include "Codegen.h"
+
+#include "cot-core/Ops.h"
+#include "cot-memory/Types.h"
+#include "cot-memory/Ops.h"
+#include "cot-flow/Ops.h"
+#include "cot-structs/Types.h"
+#include "cot-structs/Ops.h"
+#include "cot-arrays/Types.h"
+#include "cot-arrays/Ops.h"
+#include "cot-slices/Types.h"
+#include "cot-slices/Ops.h"
+
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/IR/Builders.h"
+#include "mlir/IR/BuiltinOps.h"
+
+#include "llvm/ADT/StringSwitch.h"
+
+using namespace mlir;
+
+namespace ac {
+
+class CodeGenImpl {
+  OpBuilder b;
+  Location loc;
+  StringRef source_;
+  std::string filename_;
+  ModuleOp module_;
+
+  // Scope: variable name → alloca address + value type
+  llvm::DenseMap<llvm::StringRef, std::pair<Value, Type>> locals_;
+  // Parameters: name → SSA value (direct)
+  llvm::DenseMap<llvm::StringRef, Value> params_;
+  // Struct type registry: name → CIR StructType
+  llvm::StringMap<cir::StructType> structTypes_;
+
+  std::pair<unsigned, unsigned> lineCol(size_t offset) const {
+    unsigned line = 1, col = 1;
+    for (size_t i = 0; i < offset && i < source_.size(); i++) {
+      if (source_[i] == '\n') { line++; col = 1; }
+      else { col++; }
+    }
+    return {line, col};
+  }
+
+  Location locFrom(size_t offset) {
+    auto [line, col] = lineCol(offset);
+    return FileLineColLoc::get(b.getContext(), StringRef(filename_),
+                               line, col);
+  }
+
+  Type resolveType(const TypeRef &t) {
+    // Array type: [N]T
+    if (t.isArray) {
+      TypeRef elemRef{t.name, 0, false};
+      auto elemType = resolveType(elemRef);
+      return cir::ArrayType::get(b.getContext(), t.arrayLen, elemType);
+    }
+
+    // Primitive types
+    auto prim = llvm::StringSwitch<Type>(t.name)
+        .Case("i8", b.getIntegerType(8))
+        .Case("i16", b.getIntegerType(16))
+        .Case("i32", b.getIntegerType(32))
+        .Case("i64", b.getIntegerType(64))
+        .Case("u8", b.getIntegerType(8))
+        .Case("u16", b.getIntegerType(16))
+        .Case("u32", b.getIntegerType(32))
+        .Case("u64", b.getIntegerType(64))
+        .Case("f32", b.getF32Type())
+        .Case("f64", b.getF64Type())
+        .Case("bool", b.getI1Type())
+        .Default(Type());
+    if (prim) return prim;
+
+    // Struct type lookup
+    auto it = structTypes_.find(t.name);
+    if (it != structTypes_.end())
+      return it->second;
+
+    llvm::errs() << "error: unknown type '" << t.name << "'\n";
+    return Type();
+  }
+
+  // Look up field index in a struct type by name
+  int64_t getFieldIndex(cir::StructType sty, llvm::StringRef fieldName) {
+    auto names = sty.getFieldNames();
+    for (unsigned i = 0; i < names.size(); i++) {
+      if (names[i].getValue() == fieldName)
+        return i;
+    }
+    llvm::errs() << "error: no field '" << fieldName << "' in struct '"
+                  << sty.getName().getValue() << "'\n";
+    return -1;
+  }
+
+  Value emitExpr(const Expr &e, Type expectedType = Type()) {
+    loc = locFrom(e.pos);
+
+    switch (e.kind) {
+    case ExprKind::IntLit: {
+      auto type = expectedType ? expectedType : b.getI32Type();
+      auto attr = b.getIntegerAttr(type, e.intVal);
+      return b.create<cir::ConstantOp>(loc, type, attr);
+    }
+    case ExprKind::FloatLit: {
+      auto type = expectedType ? expectedType : b.getF64Type();
+      auto attr = b.getFloatAttr(type, e.floatVal);
+      return b.create<cir::ConstantOp>(loc, type, attr);
+    }
+    case ExprKind::BoolLit: {
+      auto type = b.getI1Type();
+      auto attr = b.getBoolAttr(e.boolVal);
+      return b.create<cir::ConstantOp>(loc, type, attr);
+    }
+    case ExprKind::StringLit: {
+      // Emit cir.string_constant → !cir.slice<i8>
+      auto sliceType = cir::SliceType::get(b.getContext(), b.getIntegerType(8));
+      return b.create<cir::StringConstantOp>(loc, sliceType, e.strVal);
+    }
+    case ExprKind::Ident: {
+      auto pit = params_.find(e.name);
+      if (pit != params_.end())
+        return pit->second;
+      auto lit = locals_.find(e.name);
+      if (lit != locals_.end()) {
+        auto [addr, type] = lit->second;
+        return b.create<cir::LoadOp>(loc, type, addr);
+      }
+      llvm::errs() << "error: undefined variable '" << e.name << "'\n";
+      return Value();
+    }
+    case ExprKind::Call: {
+      auto callee = module_.lookupSymbol<func::FuncOp>(e.name);
+      if (!callee) {
+        llvm::errs() << "error: undefined function '" << e.name << "'\n";
+        return Value();
+      }
+      SmallVector<Value> args;
+      auto paramTypes = callee.getFunctionType().getInputs();
+      for (unsigned i = 0; i < e.args.size(); i++)
+        args.push_back(emitExpr(*e.args[i],
+                                i < paramTypes.size() ? paramTypes[i]
+                                                      : Type()));
+      auto callOp = b.create<func::CallOp>(loc, callee, args);
+      return callOp.getNumResults() > 0 ? callOp.getResult(0) : Value();
+    }
+    case ExprKind::UnaryOp: {
+      auto val = emitExpr(*e.rhs);
+      if (e.op == TokenKind::Minus)
+        return b.create<cir::NegOp>(loc, val.getType(), val);
+      if (e.op == TokenKind::Tilde)
+        return b.create<cir::BitNotOp>(loc, val.getType(), val);
+      if (e.op == TokenKind::Bang) {
+        auto one = b.create<cir::ConstantOp>(
+            loc, b.getI1Type(), b.getBoolAttr(true));
+        return b.create<cir::BitXorOp>(loc, b.getI1Type(), val, one);
+      }
+      return val;
+    }
+    case ExprKind::StructLit: {
+      // Look up the struct type
+      auto it = structTypes_.find(e.name);
+      if (it == structTypes_.end()) {
+        llvm::errs() << "error: unknown struct '" << e.name << "'\n";
+        return Value();
+      }
+      auto sty = it->second;
+      auto fieldTypes = sty.getFieldTypes();
+
+      // Emit field values in struct field order
+      SmallVector<Value> fieldValues(fieldTypes.size());
+      for (auto &fi : e.fields) {
+        int64_t idx = getFieldIndex(sty, fi.name);
+        if (idx < 0) return Value();
+        fieldValues[idx] = emitExpr(*fi.value, fieldTypes[idx]);
+      }
+
+      return b.create<cir::StructInitOp>(loc, sty, fieldValues);
+    }
+    case ExprKind::FieldAccess: {
+      // Emit the base expression
+      auto base = emitExpr(*e.lhs);
+      auto baseType = base.getType();
+
+      if (auto sty = mlir::dyn_cast<cir::StructType>(baseType)) {
+        int64_t idx = getFieldIndex(sty, e.name);
+        if (idx < 0) return Value();
+        auto fieldType = sty.getFieldTypes()[idx];
+        return b.create<cir::FieldValOp>(loc, fieldType, base, idx);
+      }
+
+      llvm::errs() << "error: field access on non-struct type\n";
+      return Value();
+    }
+    case ExprKind::ArrayLit: {
+      // Emit all elements
+      SmallVector<Value> elems;
+      for (auto &arg : e.args)
+        elems.push_back(emitExpr(*arg, expectedType ? Type() : Type()));
+
+      if (elems.empty()) {
+        llvm::errs() << "error: empty array literal\n";
+        return Value();
+      }
+
+      // Infer array type from element type and count
+      auto elemType = elems[0].getType();
+      auto arrayType = cir::ArrayType::get(
+          b.getContext(), elems.size(), elemType);
+      return b.create<cir::ArrayInitOp>(loc, arrayType, elems);
+    }
+    case ExprKind::Index: {
+      auto base = emitExpr(*e.lhs);
+      auto baseType = base.getType();
+
+      if (auto arrTy = mlir::dyn_cast<cir::ArrayType>(baseType)) {
+        auto elemType = arrTy.getElementType();
+        // Constant index: use elem_val (extractvalue)
+        if (e.rhs->kind == ExprKind::IntLit) {
+          return b.create<cir::ElemValOp>(loc, elemType, base,
+                                           e.rhs->intVal);
+        }
+        // Dynamic index: alloca array, GEP, load
+        auto ptrType = cir::PointerType::get(b.getContext());
+        auto addr = b.create<cir::AllocaOp>(loc, ptrType,
+                                              TypeAttr::get(arrTy));
+        b.create<cir::StoreOp>(loc, base, addr);
+        auto idx = emitExpr(*e.rhs, b.getI64Type());
+        auto elemPtr = b.create<cir::ElemPtrOp>(
+            loc, ptrType, addr, idx, TypeAttr::get(arrTy));
+        return b.create<cir::LoadOp>(loc, elemType, elemPtr);
+      }
+
+      llvm::errs() << "error: index on non-array type\n";
+      return Value();
+    }
+    case ExprKind::BinOp: {
+      // Comparison ops produce i1
+      if (e.op == TokenKind::EqEq || e.op == TokenKind::BangEq ||
+          e.op == TokenKind::Less || e.op == TokenKind::LessEq ||
+          e.op == TokenKind::Greater || e.op == TokenKind::GreaterEq) {
+        auto lhs = emitExpr(*e.lhs);
+        auto rhs = emitExpr(*e.rhs, lhs.getType());
+        auto pred = [&]() -> cir::CmpIPredicate {
+          switch (e.op) {
+          case TokenKind::EqEq:      return cir::CmpIPredicate::eq;
+          case TokenKind::BangEq:    return cir::CmpIPredicate::ne;
+          case TokenKind::Less:      return cir::CmpIPredicate::slt;
+          case TokenKind::LessEq:    return cir::CmpIPredicate::sle;
+          case TokenKind::Greater:   return cir::CmpIPredicate::sgt;
+          case TokenKind::GreaterEq: return cir::CmpIPredicate::sge;
+          default: return cir::CmpIPredicate::eq;
+          }
+        }();
+        auto predAttr = cir::CmpIPredicateAttr::get(b.getContext(), pred);
+        return b.create<cir::CmpOp>(loc, b.getI1Type(), predAttr, lhs, rhs);
+      }
+
+      // Logical ops: short-circuit via cir.select
+      if (e.op == TokenKind::AmpAmp) {
+        auto lhs = emitExpr(*e.lhs);
+        auto rhs = emitExpr(*e.rhs);
+        auto f = b.create<cir::ConstantOp>(
+            loc, b.getI1Type(), b.getBoolAttr(false));
+        return b.create<cir::SelectOp>(loc, b.getI1Type(), lhs, rhs, f);
+      }
+      if (e.op == TokenKind::PipePipe) {
+        auto lhs = emitExpr(*e.lhs);
+        auto rhs = emitExpr(*e.rhs);
+        auto t = b.create<cir::ConstantOp>(
+            loc, b.getI1Type(), b.getBoolAttr(true));
+        return b.create<cir::SelectOp>(loc, b.getI1Type(), lhs, t, rhs);
+      }
+
+      // Arithmetic
+      auto lhs = emitExpr(*e.lhs, expectedType);
+      auto rhs = emitExpr(*e.rhs, lhs.getType());
+      auto type = lhs.getType();
+
+      switch (e.op) {
+      case TokenKind::Plus:    return b.create<cir::AddOp>(loc, type, lhs, rhs);
+      case TokenKind::Minus:   return b.create<cir::SubOp>(loc, type, lhs, rhs);
+      case TokenKind::Star:    return b.create<cir::MulOp>(loc, type, lhs, rhs);
+      case TokenKind::Slash:   return b.create<cir::DivSIOp>(loc, type, lhs, rhs);
+      case TokenKind::Percent: return b.create<cir::RemSIOp>(loc, type, lhs, rhs);
+      case TokenKind::Amp:     return b.create<cir::BitAndOp>(loc, type, lhs, rhs);
+      case TokenKind::Pipe:    return b.create<cir::BitOrOp>(loc, type, lhs, rhs);
+      case TokenKind::Caret:   return b.create<cir::BitXorOp>(loc, type, lhs, rhs);
+      case TokenKind::Shl:     return b.create<cir::ShlOp>(loc, type, lhs, rhs);
+      case TokenKind::Shr:     return b.create<cir::ShrOp>(loc, type, lhs, rhs);
+      default:
+        llvm::errs() << "error: unsupported binary op\n";
+        return lhs;
+      }
+    }
+    }
+    return Value();
+  }
+
+  void emitStmt(const Stmt &s) {
+    loc = locFrom(s.pos);
+
+    switch (s.kind) {
+    case StmtKind::Return: {
+      if (s.expr) {
+        auto val = emitExpr(*s.expr);
+        b.create<func::ReturnOp>(loc, ValueRange{val});
+      } else {
+        b.create<func::ReturnOp>(loc, ValueRange{});
+      }
+      break;
+    }
+    case StmtKind::Let:
+    case StmtKind::Var: {
+      auto val = emitExpr(*s.expr);
+      auto type = val.getType();
+      auto ptrType = cir::PointerType::get(b.getContext());
+      auto addr = b.create<cir::AllocaOp>(loc, ptrType,
+                                            TypeAttr::get(type));
+      b.create<cir::StoreOp>(loc, val, addr);
+      locals_[s.varName] = {addr, type};
+      break;
+    }
+    case StmtKind::Assign: {
+      auto it = locals_.find(s.varName);
+      if (it == locals_.end()) {
+        llvm::errs() << "error: undefined variable '" << s.varName << "'\n";
+        break;
+      }
+      auto val = emitExpr(*s.expr, it->second.second);
+      b.create<cir::StoreOp>(loc, val, it->second.first);
+      break;
+    }
+    case StmtKind::CompoundAssign: {
+      auto it = locals_.find(s.varName);
+      if (it == locals_.end()) {
+        llvm::errs() << "error: undefined variable '" << s.varName << "'\n";
+        break;
+      }
+      auto [addr, type] = it->second;
+      auto cur = b.create<cir::LoadOp>(loc, type, addr);
+      auto rhs = emitExpr(*s.expr, type);
+      Value result;
+      switch (s.op) {
+      case TokenKind::PlusEq:  result = b.create<cir::AddOp>(loc, type, cur, rhs); break;
+      case TokenKind::MinusEq: result = b.create<cir::SubOp>(loc, type, cur, rhs); break;
+      case TokenKind::StarEq:  result = b.create<cir::MulOp>(loc, type, cur, rhs); break;
+      case TokenKind::SlashEq: result = b.create<cir::DivSIOp>(loc, type, cur, rhs); break;
+      default: result = cur; break;
+      }
+      b.create<cir::StoreOp>(loc, result, addr);
+      break;
+    }
+    case StmtKind::If: {
+      auto cond = emitExpr(*s.expr);
+      auto *parentFunc = b.getInsertionBlock()->getParentOp();
+      auto &region = parentFunc->getRegion(0);
+
+      auto *thenBlock = new Block();
+      auto *mergeBlock = new Block();
+      Block *elseBlock = s.elseBody.empty() ? mergeBlock : new Block();
+
+      b.create<cir::CondBrOp>(loc, cond, ValueRange{}, ValueRange{},
+                               thenBlock, elseBlock);
+
+      region.push_back(thenBlock);
+      b.setInsertionPointToStart(thenBlock);
+      for (auto &st : s.thenBody)
+        emitStmt(*st);
+      bool thenTerminates = !thenBlock->empty() &&
+          b.getInsertionBlock()->back().hasTrait<OpTrait::IsTerminator>();
+      if (!thenTerminates)
+        b.create<cir::BrOp>(loc, ValueRange{}, mergeBlock);
+
+      bool elseTerminates = false;
+      if (!s.elseBody.empty()) {
+        region.push_back(elseBlock);
+        b.setInsertionPointToStart(elseBlock);
+        for (auto &st : s.elseBody)
+          emitStmt(*st);
+        elseTerminates = !elseBlock->empty() &&
+            b.getInsertionBlock()->back().hasTrait<OpTrait::IsTerminator>();
+        if (!elseTerminates)
+          b.create<cir::BrOp>(loc, ValueRange{}, mergeBlock);
+      }
+
+      if (!thenTerminates || !elseTerminates || s.elseBody.empty()) {
+        region.push_back(mergeBlock);
+        b.setInsertionPointToStart(mergeBlock);
+      } else {
+        delete mergeBlock;
+        auto *deadBlock = new Block();
+        region.push_back(deadBlock);
+        b.setInsertionPointToStart(deadBlock);
+      }
+      break;
+    }
+    case StmtKind::While: {
+      auto *parentFunc = b.getInsertionBlock()->getParentOp();
+      auto &region = parentFunc->getRegion(0);
+
+      auto *headerBlock = new Block();
+      auto *bodyBlock = new Block();
+      auto *exitBlock = new Block();
+
+      b.create<cir::BrOp>(loc, ValueRange{}, headerBlock);
+
+      region.push_back(headerBlock);
+      b.setInsertionPointToStart(headerBlock);
+      auto cond = emitExpr(*s.expr);
+      b.create<cir::CondBrOp>(loc, cond, ValueRange{}, ValueRange{},
+                               bodyBlock, exitBlock);
+
+      region.push_back(bodyBlock);
+      b.setInsertionPointToStart(bodyBlock);
+      for (auto &st : s.thenBody)
+        emitStmt(*st);
+      if (!bodyBlock->back().hasTrait<OpTrait::IsTerminator>())
+        b.create<cir::BrOp>(loc, ValueRange{}, headerBlock);
+
+      region.push_back(exitBlock);
+      b.setInsertionPointToStart(exitBlock);
+      break;
+    }
+    case StmtKind::ExprStmt:
+      emitExpr(*s.expr);
+      break;
+    }
+  }
+
+  void emitStructDef(const StructDef &sd) {
+    SmallVector<StringAttr> fieldNames;
+    SmallVector<Type> fieldTypes;
+    for (auto &f : sd.fields) {
+      fieldNames.push_back(StringAttr::get(b.getContext(), f.name));
+      fieldTypes.push_back(resolveType(f.type));
+    }
+    auto sty = cir::StructType::get(
+        b.getContext(), StringAttr::get(b.getContext(), sd.name),
+        fieldNames, fieldTypes);
+    structTypes_[sd.name] = sty;
+  }
+
+  void emitFnDecl(const FnDecl &fn) {
+    loc = locFrom(fn.pos);
+
+    SmallVector<Type> paramTypes;
+    for (auto &p : fn.params)
+      paramTypes.push_back(resolveType(p.type));
+
+    SmallVector<Type> resultTypes;
+    auto retType = resolveType(fn.returnType);
+    if (retType)
+      resultTypes.push_back(retType);
+
+    auto funcType = b.getFunctionType(paramTypes, resultTypes);
+    auto funcOp = b.create<func::FuncOp>(loc, fn.name, funcType);
+
+    auto *entryBlock = funcOp.addEntryBlock();
+    b.setInsertionPointToStart(entryBlock);
+
+    params_.clear();
+    locals_.clear();
+    for (unsigned i = 0; i < fn.params.size(); i++)
+      params_[fn.params[i].name] = entryBlock->getArgument(i);
+
+    for (auto &s : fn.body)
+      emitStmt(*s);
+
+    // Ensure every reachable block has a terminator. Remove dead blocks.
+    SmallVector<Block *> deadBlocks;
+    for (auto &block : funcOp.getBody()) {
+      if (block.hasNoPredecessors() && &block != &funcOp.getBody().front()) {
+        deadBlocks.push_back(&block);
+        continue;
+      }
+      if (!block.empty() && block.back().hasTrait<OpTrait::IsTerminator>())
+        continue;
+      b.setInsertionPointToEnd(&block);
+      if (resultTypes.empty()) {
+        b.create<func::ReturnOp>(loc, ValueRange{});
+      } else {
+        auto zero = b.create<cir::ConstantOp>(
+            loc, resultTypes[0], b.getIntegerAttr(resultTypes[0], 0));
+        b.create<func::ReturnOp>(loc, ValueRange{zero});
+      }
+    }
+    for (auto *dead : deadBlocks)
+      dead->erase();
+
+    b.setInsertionPointToEnd(module_.getBody());
+  }
+
+public:
+  CodeGenImpl(MLIRContext &ctx, StringRef source, StringRef filename)
+      : b(&ctx), loc(b.getUnknownLoc()), source_(source),
+        filename_(filename.str()) {
+    module_ = ModuleOp::create(loc);
+    b.setInsertionPointToEnd(module_.getBody());
+  }
+
+  ModuleOp emit(const Module &mod) {
+    // Register struct types first (so functions can reference them)
+    for (auto &sd : mod.structs)
+      emitStructDef(sd);
+    for (auto &fn : mod.functions)
+      emitFnDecl(fn);
+    return module_;
+  }
+};
+
+OwningOpRef<ModuleOp> codegen(MLIRContext &ctx, StringRef source,
+                               const Module &mod, StringRef filename) {
+  CodeGenImpl cg(ctx, source, filename);
+  return cg.emit(mod);
+}
+
+} // namespace ac
