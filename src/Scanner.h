@@ -42,6 +42,9 @@ enum class TokenKind {
   Null,
   Orelse,
   Struct,
+  Try,
+  Catch,
+  As,
 
   // Types
   I8, I16, I32, I64,

@@ -1,0 +1,37 @@
+// RUN: %cot test %s
+
+fn divide(a: i32, b: i32) -> i32!error {
+  if b == 0 {
+    return error(1)
+  }
+  return a / b
+}
+
+fn chain(a: i32, b: i32) -> i32!error {
+  let val: i32 = try divide(a, b)
+  return val * 2
+}
+
+test "successful division" {
+  let result: i32!error = divide(10, 2)
+  let val: i32 = result catch 0
+  assert(val == 5)
+}
+
+test "division by zero returns error" {
+  let result: i32!error = divide(10, 0)
+  let val: i32 = result catch -1
+  assert(val == -1)
+}
+
+test "try propagation success" {
+  let result: i32!error = chain(10, 2)
+  let val: i32 = result catch 0
+  assert(val == 10)
+}
+
+test "try propagation error" {
+  let result: i32!error = chain(10, 0)
+  let val: i32 = result catch -1
+  assert(val == -1)
+}

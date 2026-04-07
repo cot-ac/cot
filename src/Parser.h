@@ -21,7 +21,9 @@ struct TypeRef {
   llvm::StringRef name;    // "i32", "void", "Point", etc.
   int64_t arrayLen = 0;    // >0 for [N]T array types
   bool isArray = false;    // true for [N]T
-  bool isOptional = false; // true for ?T
+  bool isOptional = false;   // true for ?T
+  bool isErrorUnion = false; // true for T!error
+  bool isPointer = false;    // true for *T
 };
 
 struct Param {
@@ -41,7 +43,11 @@ enum class ExprKind {
   FieldAccess,  // expr.field
   ArrayLit,     // [1, 2, 3]
   Index,        // expr[expr]
-  ForceUnwrap   // expr!
+  ForceUnwrap,  // expr!
+  TryUnwrap,    // try expr
+  AddrOf,       // &x
+  Deref,        // *p
+  CastAs        // expr as Type
 };
 
 struct Expr {
@@ -57,16 +63,19 @@ struct Expr {
   ExprPtr lhs, rhs;          // BinOp, Index (lhs=base, rhs=index)
   llvm::SmallVector<ExprPtr> args;       // Call, ArrayLit
   llvm::SmallVector<FieldInit> fields;   // StructLit
+  TypeRef castType;                      // CastAs target type
 };
 
 enum class StmtKind {
-  Return, ExprStmt, If, While, Let, Var, Assign, CompoundAssign, Assert
+  Return, ExprStmt, If, While, For, Break, Continue,
+  Let, Var, Assign, CompoundAssign, Assert
 };
 
 struct Stmt {
   StmtKind kind;
   size_t pos;
   ExprPtr expr;
+  ExprPtr rangeEnd;  // For loop upper bound (for i in lo..hi)
   llvm::SmallVector<StmtPtr> thenBody;
   llvm::SmallVector<StmtPtr> elseBody;
   llvm::StringRef varName;

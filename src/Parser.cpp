@@ -13,6 +13,7 @@ namespace ac {
 // Zig pattern: operator precedence table.
 static int precedence(TokenKind kind) {
   switch (kind) {
+  case TokenKind::Catch:                                 return 5;
   case TokenKind::Orelse:                                return 5;
   case TokenKind::PipePipe:                              return 10;
   case TokenKind::AmpAmp:                                return 20;
@@ -77,6 +78,13 @@ class ParserImpl {
   // ---- Type ----
   // Handles: i32, Point (identifier), [N]T (array), ?T (optional)
   TypeRef parseType() {
+    // Pointer type: *T
+    if (check(TokenKind::Star)) {
+      advance(); // *
+      auto inner = parseType();
+      inner.isPointer = true;
+      return inner;
+    }
     // Optional type: ?T
     if (check(TokenKind::Question)) {
       advance(); // ?
@@ -98,7 +106,16 @@ class ParserImpl {
       return t;
     }
     auto &tok = advance();
-    return TypeRef{tokenText(tok), 0, false, false};
+    TypeRef t{tokenText(tok), 0, false, false, false};
+    // Error union type suffix: T!error
+    if (check(TokenKind::Bang) && pos_ + 1 < tokens_.size() &&
+        peekAt(1).kind == TokenKind::Identifier &&
+        tokenText(peekAt(1)) == "error") {
+      advance(); // !
+      advance(); // error
+      t.isErrorUnion = true;
+    }
+    return t;
   }
 
   // ---- Expressions ----
@@ -244,6 +261,38 @@ class ParserImpl {
       return e;
     }
 
+    // try expr — unwrap error union or propagate
+    if (tok.kind == TokenKind::Try) {
+      advance();
+      auto e = std::make_unique<Expr>();
+      e->kind = ExprKind::TryUnwrap;
+      e->pos = tok.start;
+      e->lhs = parsePrimary();
+      e->lhs = parsePostfix(std::move(e->lhs));
+      return e;
+    }
+
+    // Address-of: &expr
+    if (tok.kind == TokenKind::Amp) {
+      advance();
+      auto e = std::make_unique<Expr>();
+      e->kind = ExprKind::AddrOf;
+      e->pos = tok.start;
+      e->lhs = parsePrimary();
+      return e;
+    }
+
+    // Dereference: *expr
+    if (tok.kind == TokenKind::Star) {
+      advance();
+      auto e = std::make_unique<Expr>();
+      e->kind = ExprKind::Deref;
+      e->pos = tok.start;
+      e->lhs = parsePrimary();
+      e->lhs = parsePostfix(std::move(e->lhs));
+      return e;
+    }
+
     // Unary operators: -, !, ~
     if (tok.kind == TokenKind::Minus || tok.kind == TokenKind::Bang ||
         tok.kind == TokenKind::Tilde) {
@@ -298,6 +347,17 @@ class ParserImpl {
         e->pos = base->pos;
         e->lhs = std::move(base);
         e->rhs = std::move(idx);
+        base = std::move(e);
+        continue;
+      }
+      // Cast: expr as Type
+      if (check(TokenKind::As)) {
+        auto &asTok = advance();
+        auto e = std::make_unique<Expr>();
+        e->kind = ExprKind::CastAs;
+        e->pos = asTok.start;
+        e->lhs = std::move(base);
+        e->castType = parseType();
         base = std::move(e);
         continue;
       }
@@ -409,6 +469,39 @@ class ParserImpl {
       return s;
     }
 
+    // for name in lo..hi { ... }
+    if (tok.kind == TokenKind::For) {
+      advance();
+      auto s = std::make_unique<Stmt>();
+      s->kind = StmtKind::For;
+      s->pos = tok.start;
+      s->varName = tokenText(expect(TokenKind::Identifier));
+      expect(TokenKind::In);
+      s->expr = parseExpr();      // lo
+      expect(TokenKind::DotDot);
+      s->rangeEnd = parseExpr();  // hi
+      s->thenBody = parseBlock();
+      return s;
+    }
+
+    // break
+    if (tok.kind == TokenKind::Break) {
+      advance();
+      auto s = std::make_unique<Stmt>();
+      s->kind = StmtKind::Break;
+      s->pos = tok.start;
+      return s;
+    }
+
+    // continue
+    if (tok.kind == TokenKind::Continue) {
+      advance();
+      auto s = std::make_unique<Stmt>();
+      s->kind = StmtKind::Continue;
+      s->pos = tok.start;
+      return s;
+    }
+
     // while expr { ... }
     if (tok.kind == TokenKind::While) {
       advance();
@@ -513,7 +606,7 @@ class ParserImpl {
     if (match(TokenKind::Arrow))
       fn.returnType = parseType();
     else
-      fn.returnType = TypeRef{"void", 0, false};
+      fn.returnType = TypeRef{"void", 0, false, false, false};
 
     fn.body = parseBlock();
     return fn;

@@ -1,0 +1,42 @@
+// RUN: %cot test %s
+
+test "basic for loop" {
+  var sum: i32 = 0
+  for i in 0..10 {
+    sum += i
+  }
+  assert(sum == 45)
+}
+
+test "for loop with break" {
+  var sum: i32 = 0
+  for i in 0..100 {
+    if i == 5 {
+      break
+    }
+    sum += i
+  }
+  assert(sum == 10)
+}
+
+test "for loop with continue" {
+  var sum: i32 = 0
+  for i in 0..10 {
+    if i == 3 {
+      continue
+    }
+    sum += i
+  }
+  // 0+1+2+4+5+6+7+8+9 = 42
+  assert(sum == 42)
+}
+
+test "nested for loop" {
+  var count: i32 = 0
+  for i in 0..3 {
+    for j in 0..4 {
+      count += 1
+    }
+  }
+  assert(count == 12)
+}

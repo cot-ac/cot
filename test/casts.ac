@@ -1,0 +1,26 @@
+// RUN: %cot test %s
+
+test "int widening" {
+  let x: i8 = 42
+  let y: i32 = x as i32
+  assert(y == 42)
+}
+
+test "int narrowing" {
+  let x: i32 = 255
+  let y: i8 = x as i8
+  // 255 as i8 = -1 (signed)
+  assert(y == -1)
+}
+
+test "int to float" {
+  let x: i32 = 7
+  let y: f64 = x as f64
+  assert(y == 7.0)
+}
+
+test "float to int" {
+  let x: f64 = 3.14
+  let y: i32 = x as i32
+  assert(y == 3)
+}
