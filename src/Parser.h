@@ -65,6 +65,7 @@ struct Expr {
   ExprPtr lhs, rhs;          // BinOp, Index (lhs=base, rhs=index)
   llvm::SmallVector<ExprPtr> args;       // Call, ArrayLit
   llvm::SmallVector<FieldInit> fields;   // StructLit
+  llvm::SmallVector<TypeRef> typeArgs;   // Call with type args: identity[i32](x)
   TypeRef castType;                      // CastAs target type
 };
 
@@ -102,6 +103,7 @@ struct StructDef {
 
 struct FnDecl {
   llvm::StringRef name;
+  llvm::SmallVector<llvm::StringRef> typeParams;  // [T, U] generic type params
   llvm::SmallVector<Param> params;
   TypeRef returnType;
   llvm::SmallVector<StmtPtr> body;

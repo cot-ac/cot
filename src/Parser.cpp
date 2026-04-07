@@ -31,6 +31,25 @@ static int precedence(TokenKind kind) {
   }
 }
 
+// Can this token start a type expression?
+// Used to disambiguate generic call name[Type](...) from array index name[expr].
+static bool isTypeStart(TokenKind kind) {
+  switch (kind) {
+  case TokenKind::I8:  case TokenKind::I16:
+  case TokenKind::I32: case TokenKind::I64:
+  case TokenKind::U8:  case TokenKind::U16:
+  case TokenKind::U32: case TokenKind::U64:
+  case TokenKind::F32: case TokenKind::F64:
+  case TokenKind::Bool: case TokenKind::Void:
+  case TokenKind::Identifier:  // User-defined types: Point, List
+  case TokenKind::Question:    // ?T optional
+  case TokenKind::Star:        // *T pointer
+    return true;
+  default:
+    return false;
+  }
+}
+
 // Is this token a type keyword? (used to disambiguate Ident vs type)
 static bool isTypeKeyword(TokenKind kind) {
   switch (kind) {
@@ -239,6 +258,31 @@ class ParserImpl {
           expect(TokenKind::RBrace);
           return e;
         }
+      }
+
+      // Generic call: identity[i32](args...) — brackets contain type names
+      // Disambiguate from array index: arr[0] — brackets contain expressions
+      // Check: name[TypeKeyword...](  vs  name[expr]
+      if (check(TokenKind::LBracket) && isTypeStart(peekAt(1).kind)) {
+        advance(); // consume [
+        auto e = std::make_unique<Expr>();
+        e->kind = ExprKind::Call;
+        e->pos = tok.start;
+        e->name = name;
+        if (!check(TokenKind::RBracket)) {
+          e->typeArgs.push_back(parseType());
+          while (match(TokenKind::Comma))
+            e->typeArgs.push_back(parseType());
+        }
+        expect(TokenKind::RBracket);
+        expect(TokenKind::LParen);
+        if (!check(TokenKind::RParen)) {
+          e->args.push_back(parseExpr());
+          while (match(TokenKind::Comma))
+            e->args.push_back(parseExpr());
+        }
+        expect(TokenKind::RParen);
+        return e;
       }
 
       // Function call: ident(args...)
@@ -644,6 +688,16 @@ class ParserImpl {
     FnDecl fn;
     fn.pos = fnTok.start;
     fn.name = tokenText(expect(TokenKind::Identifier));
+
+    // Generic type parameters: fn identity[T](x: T) -> T
+    if (match(TokenKind::LBracket)) {
+      if (!check(TokenKind::RBracket)) {
+        fn.typeParams.push_back(tokenText(expect(TokenKind::Identifier)));
+        while (match(TokenKind::Comma))
+          fn.typeParams.push_back(tokenText(expect(TokenKind::Identifier)));
+      }
+      expect(TokenKind::RBracket);
+    }
 
     // Parameters
     expect(TokenKind::LParen);

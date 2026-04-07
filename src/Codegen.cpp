@@ -22,6 +22,8 @@
 #include "errors/Ops.h"
 #include "enums/Types.h"
 #include "enums/Ops.h"
+#include "generics/Types.h"
+#include "generics/Ops.h"
 #include "test/Ops.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -49,6 +51,8 @@ class CodeGenImpl {
   llvm::StringMap<cir::StructType> structTypes_;
   // Enum type registry: name → CIR EnumType
   llvm::StringMap<cir::EnumType> enumTypes_;
+  // Type parameter map: "T" → !cir.type_param<"T"> (active during generic fn emit)
+  llvm::StringMap<Type> typeParamMap_;
   // Current function return type (for try propagation)
   Type funcReturnType_;
   // Loop control flow targets (for break/continue)
@@ -130,6 +134,11 @@ class CodeGenImpl {
     auto eit = enumTypes_.find(t.name);
     if (eit != enumTypes_.end())
       return eit->second;
+
+    // Type parameter lookup (active during generic function emission)
+    auto tpit = typeParamMap_.find(t.name);
+    if (tpit != typeParamMap_.end())
+      return tpit->second;
 
     llvm::errs() << "error: unknown type '" << t.name << "'\n";
     return Type();
@@ -235,6 +244,50 @@ class CodeGenImpl {
         return b.create<cir::WrapErrorOp>(loc, expectedType, code);
       }
 
+      // Generic call: identity[i32](42) → cir.generic_apply
+      if (!e.typeArgs.empty()) {
+        SmallVector<Value> args;
+        for (auto &arg : e.args)
+          args.push_back(emitExpr(*arg, Type()));
+
+        SmallVector<Attribute> subKeys, subTypes;
+        // Look up the generic function's type param names
+        auto callee = module_.lookupSymbol<func::FuncOp>(e.name);
+        if (!callee) {
+          llvm::errs() << "error: undefined function '" << e.name << "'\n";
+          return Value();
+        }
+        // Build substitution map from positional type args
+        // The function must have been emitted with type_param types
+        for (unsigned i = 0; i < e.typeArgs.size(); i++) {
+          // Use positional name "T", "U", etc. or look up from callee
+          std::string paramName = "T";
+          if (i > 0) paramName = std::string(1, 'T' + i);
+          subKeys.push_back(StringAttr::get(b.getContext(), paramName));
+          subTypes.push_back(TypeAttr::get(resolveType(e.typeArgs[i])));
+        }
+
+        // Determine result type from the concrete substitution
+        SmallVector<Type> resultTypes;
+        auto calleeFuncType = callee.getFunctionType();
+        for (auto resTy : calleeFuncType.getResults()) {
+          if (mlir::isa<cir::TypeParamType>(resTy)) {
+            // Replace type_param with concrete type from first substitution
+            resultTypes.push_back(resolveType(e.typeArgs[0]));
+          } else {
+            resultTypes.push_back(resTy);
+          }
+        }
+
+        auto calleeAttr = FlatSymbolRefAttr::get(b.getContext(), e.name);
+        auto op = b.create<cir::GenericApplyOp>(
+            loc, resultTypes, calleeAttr, args,
+            ArrayAttr::get(b.getContext(), subKeys),
+            ArrayAttr::get(b.getContext(), subTypes));
+        return op.getNumResults() > 0 ? op.getResult(0) : Value();
+      }
+
+      // Regular function call
       auto callee = module_.lookupSymbol<func::FuncOp>(e.name);
       if (!callee) {
         llvm::errs() << "error: undefined function '" << e.name << "'\n";
@@ -971,6 +1024,12 @@ class CodeGenImpl {
 
   void emitFnDecl(const FnDecl &fn) {
     loc = locFrom(fn.pos);
+
+    // Set up type parameter map for generic functions
+    typeParamMap_.clear();
+    for (auto &tp : fn.typeParams) {
+      typeParamMap_[tp] = cir::TypeParamType::get(b.getContext(), tp);
+    }
 
     SmallVector<Type> paramTypes;
     for (auto &p : fn.params)

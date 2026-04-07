@@ -1,0 +1,10 @@
+// RUN: %cot build %s %t && %t; test $? -eq 42
+
+fn identity[T](x: T) -> T {
+  return x
+}
+
+fn main() -> i32 {
+  let result: i32 = identity[i32](42)
+  return result
+}
