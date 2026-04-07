@@ -537,6 +537,26 @@ class ParserImpl {
       return s;
     }
 
+    // match expr { Variant1 => { ... }, Variant2 => { ... } }
+    if (tok.kind == TokenKind::Match) {
+      advance();
+      auto s = std::make_unique<Stmt>();
+      s->kind = StmtKind::Match;
+      s->pos = tok.start;
+      s->expr = parseExpr();
+      expect(TokenKind::LBrace);
+      skipSemis();
+      while (!check(TokenKind::RBrace) && !check(TokenKind::Eof)) {
+        auto variantName = tokenText(expect(TokenKind::Identifier));
+        s->matchVariants.push_back(variantName);
+        expect(TokenKind::FatArrow); // =>
+        s->matchBodies.push_back(parseBlock());
+        skipSemis();
+      }
+      expect(TokenKind::RBrace);
+      return s;
+    }
+
     // Expression statement, assignment, or compound assignment
     auto expr = parseExpr();
 
@@ -583,6 +603,23 @@ class ParserImpl {
   }
 
   // ---- Top-level ----
+  EnumDef parseEnumDef() {
+    auto &enumTok = expect(TokenKind::Enum);
+    EnumDef ed;
+    ed.pos = enumTok.start;
+    ed.name = tokenText(expect(TokenKind::Identifier));
+    expect(TokenKind::LBrace);
+    skipSemis();
+    while (!check(TokenKind::RBrace) && !check(TokenKind::Eof)) {
+      ed.variants.push_back(tokenText(expect(TokenKind::Identifier)));
+      skipSemis();
+      // Allow trailing comma
+      if (check(TokenKind::Comma)) { advance(); skipSemis(); }
+    }
+    expect(TokenKind::RBrace);
+    return ed;
+  }
+
   StructDef parseStructDef() {
     auto &structTok = expect(TokenKind::Struct);
     StructDef sd;
@@ -659,10 +696,12 @@ public:
         mod.functions.push_back(parseFnDecl());
       } else if (check(TokenKind::Struct)) {
         mod.structs.push_back(parseStructDef());
+      } else if (check(TokenKind::Enum)) {
+        mod.enums.push_back(parseEnumDef());
       } else if (check(TokenKind::Test)) {
         mod.tests.push_back(parseTestDecl());
       } else {
-        llvm::errs() << "error: expected 'fn', 'struct', or 'test', got '"
+        llvm::errs() << "error: expected 'fn', 'struct', 'enum', or 'test', got '"
                       << tokenText(peek()) << "'\n";
         advance();
       }

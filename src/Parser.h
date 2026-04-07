@@ -70,7 +70,7 @@ struct Expr {
 
 enum class StmtKind {
   Return, ExprStmt, If, While, For, Break, Continue,
-  Let, Var, Assign, CompoundAssign, Assert
+  Let, Var, Assign, CompoundAssign, Assert, Match
 };
 
 struct Stmt {
@@ -83,6 +83,15 @@ struct Stmt {
   llvm::StringRef varName;
   TypeRef varType;
   TokenKind op = TokenKind::Invalid;
+  // Match arms: parallel vectors (variant name + body statements)
+  llvm::SmallVector<llvm::StringRef> matchVariants;
+  llvm::SmallVector<llvm::SmallVector<StmtPtr>> matchBodies;
+};
+
+struct EnumDef {
+  llvm::StringRef name;
+  llvm::SmallVector<llvm::StringRef> variants;
+  size_t pos;
 };
 
 struct StructDef {
@@ -106,6 +115,7 @@ struct TestDecl {
 };
 
 struct Module {
+  llvm::SmallVector<EnumDef> enums;
   llvm::SmallVector<StructDef> structs;
   llvm::SmallVector<FnDecl> functions;
   llvm::SmallVector<TestDecl> tests;

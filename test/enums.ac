@@ -1,0 +1,21 @@
+// RUN: %cot test %s
+
+enum Color {
+  Red
+  Green
+  Blue
+}
+
+fn color_value(c: Color) -> i32 {
+  let tag: i32 = c as i32
+  return tag
+}
+
+test "enum constant values" {
+  let r: Color = Color.Red
+  let g: Color = Color.Green
+  let b: Color = Color.Blue
+  assert(color_value(r) == 0)
+  assert(color_value(g) == 1)
+  assert(color_value(b) == 2)
+}

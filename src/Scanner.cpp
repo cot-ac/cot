@@ -69,6 +69,8 @@ static TokenKind lookupKeyword(llvm::StringRef word) {
       .Case("try", TokenKind::Try)
       .Case("catch", TokenKind::Catch)
       .Case("as", TokenKind::As)
+      .Case("enum", TokenKind::Enum)
+      .Case("match", TokenKind::Match)
       .Case("i8", TokenKind::I8)
       .Case("i16", TokenKind::I16)
       .Case("i32", TokenKind::I32)
@@ -196,6 +198,9 @@ Token Scanner::next() {
     if (index_ < source_.size() && source_[index_] == '=') {
       index_++;
       kind = TokenKind::EqEq;
+    } else if (index_ < source_.size() && source_[index_] == '>') {
+      index_++;
+      kind = TokenKind::FatArrow;
     } else {
       kind = TokenKind::Eq;
     }

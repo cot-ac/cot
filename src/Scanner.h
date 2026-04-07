@@ -45,6 +45,8 @@ enum class TokenKind {
   Try,
   Catch,
   As,
+  Enum,
+  Match,
 
   // Types
   I8, I16, I32, I64,
@@ -96,6 +98,7 @@ enum class TokenKind {
   Shr,       // >>
   DotDot,    // ..
   Question,  // ?
+  FatArrow,  // =>
 };
 
 struct Token {

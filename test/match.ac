@@ -1,0 +1,39 @@
+// RUN: %cot test %s
+
+enum Direction {
+  North
+  South
+  East
+  West
+}
+
+fn direction_score(d: Direction) -> i32 {
+  var result: i32 = 0
+  match d {
+    North => {
+      result = 10
+    }
+    South => {
+      result = 20
+    }
+    East => {
+      result = 30
+    }
+    West => {
+      result = 42
+    }
+  }
+  return result
+}
+
+test "match north" {
+  assert(direction_score(Direction.North) == 10)
+}
+
+test "match south" {
+  assert(direction_score(Direction.South) == 20)
+}
+
+test "match west" {
+  assert(direction_score(Direction.West) == 42)
+}

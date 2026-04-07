@@ -20,6 +20,8 @@
 #include "optionals/Ops.h"
 #include "errors/Types.h"
 #include "errors/Ops.h"
+#include "enums/Types.h"
+#include "enums/Ops.h"
 #include "test/Ops.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -45,6 +47,8 @@ class CodeGenImpl {
   llvm::DenseMap<llvm::StringRef, Value> params_;
   // Struct type registry: name → CIR StructType
   llvm::StringMap<cir::StructType> structTypes_;
+  // Enum type registry: name → CIR EnumType
+  llvm::StringMap<cir::EnumType> enumTypes_;
   // Current function return type (for try propagation)
   Type funcReturnType_;
   // Loop control flow targets (for break/continue)
@@ -121,6 +125,11 @@ class CodeGenImpl {
     auto it = structTypes_.find(t.name);
     if (it != structTypes_.end())
       return it->second;
+
+    // Enum type lookup
+    auto eit = enumTypes_.find(t.name);
+    if (eit != enumTypes_.end())
+      return eit->second;
 
     llvm::errs() << "error: unknown type '" << t.name << "'\n";
     return Type();
@@ -274,6 +283,15 @@ class CodeGenImpl {
       return b.create<cir::StructInitOp>(loc, sty, fieldValues);
     }
     case ExprKind::FieldAccess: {
+      // Enum constant: EnumName.Variant → cir.enum_constant
+      if (e.lhs->kind == ExprKind::Ident) {
+        auto eit = enumTypes_.find(e.lhs->name);
+        if (eit != enumTypes_.end()) {
+          auto enumType = eit->second;
+          return b.create<cir::EnumConstantOp>(loc, enumType, e.name);
+        }
+      }
+
       // Emit the base expression
       auto base = emitExpr(*e.lhs);
       auto baseType = base.getType();
@@ -376,6 +394,10 @@ class CodeGenImpl {
       auto val = emitExpr(*e.lhs);
       auto srcType = val.getType();
       auto dstType = resolveType(e.castType);
+
+      // Enum to integer: cir.enum_value
+      if (mlir::isa<cir::EnumType>(srcType) && mlir::isa<IntegerType>(dstType))
+        return b.create<cir::EnumValueOp>(loc, dstType, val);
 
       bool srcIsInt = mlir::isa<IntegerType>(srcType);
       bool dstIsInt = mlir::isa<IntegerType>(dstType);
@@ -857,10 +879,81 @@ class CodeGenImpl {
       b.create<cir::AssertOp>(loc, cond, b.getStringAttr(msg));
       break;
     }
+    case StmtKind::Match: {
+      auto val = emitExpr(*s.expr);
+      auto enumType = mlir::dyn_cast<cir::EnumType>(val.getType());
+      if (!enumType) {
+        llvm::errs() << "error: match on non-enum type\n";
+        break;
+      }
+      // Extract tag value
+      auto tagType = enumType.getTagType();
+      auto tag = b.create<cir::EnumValueOp>(loc, tagType, val);
+
+      auto *parentFunc = b.getInsertionBlock()->getParentOp();
+      auto &region = parentFunc->getRegion(0);
+      auto *mergeBlock = new Block();
+
+      // Build case values and blocks
+      SmallVector<int64_t> caseValues;
+      SmallVector<Block *> caseBlocks;
+      auto variants = enumType.getVariants();
+
+      for (unsigned a = 0; a < s.matchVariants.size(); a++) {
+        auto variantName = s.matchVariants[a];
+        // Find variant index
+        for (unsigned v = 0; v < variants.size(); v++) {
+          if (variants[v].getValue() == variantName) {
+            caseValues.push_back(v);
+            break;
+          }
+        }
+        caseBlocks.push_back(new Block());
+      }
+
+      // Emit switch (first arm is default)
+      auto *defaultBlock = caseBlocks.empty() ? mergeBlock : caseBlocks[0];
+      SmallVector<int64_t> nonDefaultValues;
+      SmallVector<Block *> nonDefaultBlocks;
+      for (unsigned i = 1; i < caseBlocks.size(); i++) {
+        nonDefaultValues.push_back(caseValues[i]);
+        nonDefaultBlocks.push_back(caseBlocks[i]);
+      }
+
+      auto caseAttr = b.getDenseI64ArrayAttr(nonDefaultValues);
+      b.create<cir::SwitchOp>(loc, tag, caseAttr,
+                               defaultBlock, nonDefaultBlocks);
+
+      // Emit each arm body
+      for (unsigned a = 0; a < caseBlocks.size(); a++) {
+        region.push_back(caseBlocks[a]);
+        b.setInsertionPointToStart(caseBlocks[a]);
+        for (auto &st : s.matchBodies[a])
+          emitStmt(*st);
+        if (b.getInsertionBlock()->empty() ||
+            !b.getInsertionBlock()->back().hasTrait<OpTrait::IsTerminator>())
+          b.create<cir::BrOp>(loc, ValueRange{}, mergeBlock);
+      }
+
+      region.push_back(mergeBlock);
+      b.setInsertionPointToStart(mergeBlock);
+      break;
+    }
     case StmtKind::ExprStmt:
       emitExpr(*s.expr);
       break;
     }
+  }
+
+  void emitEnumDef(const EnumDef &ed) {
+    SmallVector<StringAttr> variants;
+    for (auto v : ed.variants)
+      variants.push_back(StringAttr::get(b.getContext(), v));
+    // Default to i32 tag type
+    auto tagType = b.getI32Type();
+    auto ety = cir::EnumType::get(
+        b.getContext(), ed.name, tagType, variants);
+    enumTypes_[ed.name] = ety;
   }
 
   void emitStructDef(const StructDef &sd) {
@@ -965,7 +1058,9 @@ public:
   }
 
   ModuleOp emit(const Module &mod) {
-    // Register struct types first (so functions can reference them)
+    // Register types first (so functions can reference them)
+    for (auto &ed : mod.enums)
+      emitEnumDef(ed);
     for (auto &sd : mod.structs)
       emitStructDef(sd);
     for (auto &fn : mod.functions)
