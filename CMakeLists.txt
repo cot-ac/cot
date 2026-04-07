@@ -28,51 +28,18 @@ set(COT_BUILD_DIR "${COT_SOURCE_DIR}/build" CACHE PATH
 include_directories(${COT_SOURCE_DIR}/include)
 include_directories(${COT_BUILD_DIR}/include)
 
-# Construct repos
-set(COT_CORE_SOURCE_DIR "${PROJECT_SOURCE_DIR}/../cot-core" CACHE PATH "")
-set(COT_CORE_BUILD_DIR "${COT_CORE_SOURCE_DIR}/build" CACHE PATH "")
-include_directories(${COT_CORE_SOURCE_DIR}/include)
-include_directories(${COT_CORE_BUILD_DIR}/include)
+# Core constructs monorepo
+set(CORE_SOURCE_DIR "${PROJECT_SOURCE_DIR}/../core" CACHE PATH
+    "Path to core constructs source")
+set(CORE_BUILD_DIR "${CORE_SOURCE_DIR}/build" CACHE PATH
+    "Path to core constructs build")
 
-set(COT_MEMORY_SOURCE_DIR "${PROJECT_SOURCE_DIR}/../cot-memory" CACHE PATH "")
-set(COT_MEMORY_BUILD_DIR "${COT_MEMORY_SOURCE_DIR}/build" CACHE PATH "")
-include_directories(${COT_MEMORY_SOURCE_DIR}/include)
-include_directories(${COT_MEMORY_BUILD_DIR}/include)
-
-set(COT_FLOW_SOURCE_DIR "${PROJECT_SOURCE_DIR}/../cot-flow" CACHE PATH "")
-set(COT_FLOW_BUILD_DIR "${COT_FLOW_SOURCE_DIR}/build" CACHE PATH "")
-include_directories(${COT_FLOW_SOURCE_DIR}/include)
-include_directories(${COT_FLOW_BUILD_DIR}/include)
-
-set(COT_STRUCTS_SOURCE_DIR "${PROJECT_SOURCE_DIR}/../cot-structs" CACHE PATH "")
-set(COT_STRUCTS_BUILD_DIR "${COT_STRUCTS_SOURCE_DIR}/build" CACHE PATH "")
-include_directories(${COT_STRUCTS_SOURCE_DIR}/include)
-include_directories(${COT_STRUCTS_BUILD_DIR}/include)
-
-set(COT_ARRAYS_SOURCE_DIR "${PROJECT_SOURCE_DIR}/../cot-arrays" CACHE PATH "")
-set(COT_ARRAYS_BUILD_DIR "${COT_ARRAYS_SOURCE_DIR}/build" CACHE PATH "")
-include_directories(${COT_ARRAYS_SOURCE_DIR}/include)
-include_directories(${COT_ARRAYS_BUILD_DIR}/include)
-
-set(COT_SLICES_SOURCE_DIR "${PROJECT_SOURCE_DIR}/../cot-slices" CACHE PATH "")
-set(COT_SLICES_BUILD_DIR "${COT_SLICES_SOURCE_DIR}/build" CACHE PATH "")
-include_directories(${COT_SLICES_SOURCE_DIR}/include)
-include_directories(${COT_SLICES_BUILD_DIR}/include)
-
-set(COT_OPTIONALS_SOURCE_DIR "${PROJECT_SOURCE_DIR}/../cot-optionals" CACHE PATH "")
-set(COT_OPTIONALS_BUILD_DIR "${COT_OPTIONALS_SOURCE_DIR}/build" CACHE PATH "")
-include_directories(${COT_OPTIONALS_SOURCE_DIR}/include)
-include_directories(${COT_OPTIONALS_BUILD_DIR}/include)
-
-set(COT_ERRORS_SOURCE_DIR "${PROJECT_SOURCE_DIR}/../cot-errors" CACHE PATH "")
-set(COT_ERRORS_BUILD_DIR "${COT_ERRORS_SOURCE_DIR}/build" CACHE PATH "")
-include_directories(${COT_ERRORS_SOURCE_DIR}/include)
-include_directories(${COT_ERRORS_BUILD_DIR}/include)
-
-set(COT_TEST_SOURCE_DIR "${PROJECT_SOURCE_DIR}/../cot-test" CACHE PATH "")
-set(COT_TEST_BUILD_DIR "${COT_TEST_SOURCE_DIR}/build" CACHE PATH "")
-include_directories(${COT_TEST_SOURCE_DIR}/include)
-include_directories(${COT_TEST_BUILD_DIR}/include)
+# Add include paths for all core constructs
+set(CORE_CONSTRUCTS arith memory flow structs arrays slices optionals errors test)
+foreach(construct ${CORE_CONSTRUCTS})
+  include_directories("${CORE_SOURCE_DIR}/${construct}/include")
+  include_directories("${CORE_BUILD_DIR}/${construct}/include")
+endforeach()
 
 add_definitions(${LLVM_DEFINITIONS})
 
@@ -121,35 +88,34 @@ set_target_properties(COTPipeline PROPERTIES
 target_link_libraries(cot PRIVATE CIR COTConstruct COTPipeline)
 
 # Force-load construct libraries (prevent dead-stripping of static ctors)
-if(APPLE)
-  target_link_options(cot PRIVATE
-    "-Wl,-force_load,${COT_CORE_BUILD_DIR}/lib/libCotCore.a"
-    "-Wl,-force_load,${COT_MEMORY_BUILD_DIR}/lib/libCotMemory.a"
-    "-Wl,-force_load,${COT_FLOW_BUILD_DIR}/lib/libCotFlow.a"
-    "-Wl,-force_load,${COT_STRUCTS_BUILD_DIR}/lib/libCotStructs.a"
-    "-Wl,-force_load,${COT_ARRAYS_BUILD_DIR}/lib/libCotArrays.a"
-    "-Wl,-force_load,${COT_SLICES_BUILD_DIR}/lib/libCotSlices.a"
-    "-Wl,-force_load,${COT_OPTIONALS_BUILD_DIR}/lib/libCotOptionals.a"
-    "-Wl,-force_load,${COT_ERRORS_BUILD_DIR}/lib/libCotErrors.a"
-    "-Wl,-force_load,${COT_TEST_BUILD_DIR}/lib/libCotTest.a")
-else()
-  target_link_options(cot PRIVATE
-    "-Wl,--whole-archive"
-    "${COT_CORE_BUILD_DIR}/lib/libCotCore.a"
-    "${COT_MEMORY_BUILD_DIR}/lib/libCotMemory.a"
-    "${COT_FLOW_BUILD_DIR}/lib/libCotFlow.a"
-    "${COT_STRUCTS_BUILD_DIR}/lib/libCotStructs.a"
-    "${COT_ARRAYS_BUILD_DIR}/lib/libCotArrays.a"
-    "${COT_SLICES_BUILD_DIR}/lib/libCotSlices.a"
-    "${COT_OPTIONALS_BUILD_DIR}/lib/libCotOptionals.a"
-    "${COT_ERRORS_BUILD_DIR}/lib/libCotErrors.a"
-    "${COT_TEST_BUILD_DIR}/lib/libCotTest.a"
-    "-Wl,--no-whole-archive")
-endif()
+set(CORE_FORCE_LOAD_LIBS
+  "arith:CotArith"
+  "memory:CotMemory"
+  "flow:CotFlow"
+  "structs:CotStructs"
+  "arrays:CotArrays"
+  "slices:CotSlices"
+  "optionals:CotOptionals"
+  "errors:CotErrors"
+  "test:CotTest"
+)
+
+foreach(entry ${CORE_FORCE_LOAD_LIBS})
+  string(REPLACE ":" ";" parts ${entry})
+  list(GET parts 0 dir_name)
+  list(GET parts 1 lib_name)
+  set(lib_path "${CORE_BUILD_DIR}/${dir_name}/lib/lib${lib_name}.a")
+  if(APPLE)
+    target_link_options(cot PRIVATE "-Wl,-force_load,${lib_path}")
+  else()
+    target_link_options(cot PRIVATE
+      "-Wl,--whole-archive" "${lib_path}" "-Wl,--no-whole-archive")
+  endif()
+endforeach()
 
 # Bake runtime library path for `cot test` command
 target_compile_definitions(cot PRIVATE
-    CIR_TEST_RUNTIME_PATH="${COT_TEST_BUILD_DIR}/runtime/libcir_test.a")
+    CIR_TEST_RUNTIME_PATH="${CORE_BUILD_DIR}/test/runtime/libcir_test.a")
 
 llvm_map_components_to_libnames(LLVM_LIBS
   core support target

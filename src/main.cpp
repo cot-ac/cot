@@ -11,7 +11,7 @@
 #include "cot/Pipeline/Pipeline.h"
 #include "cot/Construct/Construct.h"
 #include "cot/CIR/CIRDialect.h"
-#include "cot-test/TestRunnerGenerator.h"
+#include "test/TestRunnerGenerator.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
