@@ -35,7 +35,7 @@ set(CORE_BUILD_DIR "${CORE_SOURCE_DIR}/build" CACHE PATH
     "Path to core constructs build")
 
 # Add include paths for all core constructs
-set(CORE_CONSTRUCTS arith memory flow structs arrays slices optionals errors test enums)
+set(CORE_CONSTRUCTS arith memory flow structs arrays slices optionals errors test enums unions)
 foreach(construct ${CORE_CONSTRUCTS})
   include_directories("${CORE_SOURCE_DIR}/${construct}/include")
   include_directories("${CORE_BUILD_DIR}/${construct}/include")
@@ -99,6 +99,7 @@ set(CORE_FORCE_LOAD_LIBS
   "errors:CotErrors"
   "test:CotTest"
   "enums:CotEnums"
+  "unions:CotUnions"
 )
 
 foreach(entry ${CORE_FORCE_LOAD_LIBS})
