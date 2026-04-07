@@ -67,6 +67,13 @@ class CodeGenImpl {
   }
 
   Type resolveType(const TypeRef &t) {
+    // Slice type: []T
+    if (t.isSlice) {
+      TypeRef elemRef{t.name, 0, false, false, false, false, false};
+      auto elemType = resolveType(elemRef);
+      return cir::SliceType::get(b.getContext(), elemType);
+    }
+
     // Pointer type: *T
     if (t.isPointer) {
       // All pointers are opaque in CIR (!cir.ptr)
@@ -75,21 +82,21 @@ class CodeGenImpl {
 
     // Error union type: T!error
     if (t.isErrorUnion) {
-      TypeRef inner{t.name, t.arrayLen, t.isArray, t.isOptional, false, false};
+      TypeRef inner{t.name, t.arrayLen, t.isArray, t.isOptional, false, false, false};
       auto innerType = resolveType(inner);
       return cir::ErrorUnionType::get(b.getContext(), innerType);
     }
 
     // Optional type: ?T
     if (t.isOptional) {
-      TypeRef inner{t.name, t.arrayLen, t.isArray, false, false, false};
+      TypeRef inner{t.name, t.arrayLen, t.isArray, false, false, false, false};
       auto innerType = resolveType(inner);
       return cir::OptionalType::get(b.getContext(), innerType);
     }
 
     // Array type: [N]T
     if (t.isArray) {
-      TypeRef elemRef{t.name, 0, false, false, false, false};
+      TypeRef elemRef{t.name, 0, false, false, false, false, false};
       auto elemType = resolveType(elemRef);
       return cir::ArrayType::get(b.getContext(), t.arrayLen, elemType);
     }
@@ -271,6 +278,18 @@ class CodeGenImpl {
       auto base = emitExpr(*e.lhs);
       auto baseType = base.getType();
 
+      // Slice field access: .len, .ptr
+      if (auto sliceTy = mlir::dyn_cast<cir::SliceType>(baseType)) {
+        if (e.name == "len")
+          return b.create<cir::SliceLenOp>(loc, b.getI64Type(), base);
+        if (e.name == "ptr") {
+          auto ptrType = cir::PointerType::get(b.getContext());
+          return b.create<cir::SlicePtrOp>(loc, ptrType, base);
+        }
+        llvm::errs() << "error: unknown slice field '" << e.name << "'\n";
+        return Value();
+      }
+
       if (auto sty = mlir::dyn_cast<cir::StructType>(baseType)) {
         int64_t idx = getFieldIndex(sty, e.name);
         if (idx < 0) return Value();
@@ -302,6 +321,13 @@ class CodeGenImpl {
       auto base = emitExpr(*e.lhs);
       auto baseType = base.getType();
 
+      // Slice element access: s[i] → cir.slice_elem
+      if (auto sliceTy = mlir::dyn_cast<cir::SliceType>(baseType)) {
+        auto elemType = sliceTy.getElementType();
+        auto idx = emitExpr(*e.rhs, b.getI64Type());
+        return b.create<cir::SliceElemOp>(loc, elemType, base, idx);
+      }
+
       if (auto arrTy = mlir::dyn_cast<cir::ArrayType>(baseType)) {
         auto elemType = arrTy.getElementType();
         // Constant index: use elem_val (extractvalue)
@@ -321,6 +347,29 @@ class CodeGenImpl {
       }
 
       llvm::errs() << "error: index on non-array type\n";
+      return Value();
+    }
+    case ExprKind::SliceFrom: {
+      // arr[lo..hi] → alloca array, get ptr, array_to_slice(ptr, lo, hi)
+      auto base = emitExpr(*e.lhs);
+      auto baseType = base.getType();
+
+      if (auto arrTy = mlir::dyn_cast<cir::ArrayType>(baseType)) {
+        auto elemType = arrTy.getElementType();
+        auto ptrType = cir::PointerType::get(b.getContext());
+        auto sliceType = cir::SliceType::get(b.getContext(), elemType);
+
+        // Alloca the array to get a stable pointer
+        auto addr = b.create<cir::AllocaOp>(loc, ptrType,
+                                              TypeAttr::get(arrTy));
+        b.create<cir::StoreOp>(loc, base, addr);
+
+        auto lo = emitExpr(*e.args[0], b.getI64Type());
+        auto hi = emitExpr(*e.rhs, b.getI64Type());
+        return b.create<cir::ArrayToSliceOp>(loc, sliceType, addr, lo, hi);
+      }
+
+      llvm::errs() << "error: slice from non-array type\n";
       return Value();
     }
     case ExprKind::CastAs: {

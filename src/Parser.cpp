@@ -92,9 +92,19 @@ class ParserImpl {
       inner.isOptional = true;
       return inner;
     }
-    // Array type: [N]T
+    // Array type [N]T or slice type []T
     if (check(TokenKind::LBracket)) {
       advance(); // [
+      // Slice type: []T (no length)
+      if (check(TokenKind::RBracket)) {
+        advance(); // ]
+        auto elemType = parseType();
+        TypeRef t;
+        t.name = elemType.name;
+        t.isSlice = true;
+        return t;
+      }
+      // Array type: [N]T
       auto &lenTok = expect(TokenKind::IntLiteral);
       int64_t len = std::stoll(std::string(tokenText(lenTok)));
       expect(TokenKind::RBracket);
@@ -341,6 +351,20 @@ class ParserImpl {
       if (check(TokenKind::LBracket)) {
         advance(); // [
         auto idx = parseExpr();
+        // Slice from array: arr[lo..hi]
+        if (check(TokenKind::DotDot)) {
+          advance(); // ..
+          auto hi = parseExpr();
+          expect(TokenKind::RBracket);
+          auto e = std::make_unique<Expr>();
+          e->kind = ExprKind::SliceFrom;
+          e->pos = base->pos;
+          e->lhs = std::move(base);
+          e->rhs = std::move(hi);
+          e->args.push_back(std::move(idx)); // lo stored in args[0]
+          base = std::move(e);
+          continue;
+        }
         expect(TokenKind::RBracket);
         auto e = std::make_unique<Expr>();
         e->kind = ExprKind::Index;

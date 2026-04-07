@@ -24,6 +24,7 @@ struct TypeRef {
   bool isOptional = false;   // true for ?T
   bool isErrorUnion = false; // true for T!error
   bool isPointer = false;    // true for *T
+  bool isSlice = false;      // true for []T
 };
 
 struct Param {
@@ -47,7 +48,8 @@ enum class ExprKind {
   TryUnwrap,    // try expr
   AddrOf,       // &x
   Deref,        // *p
-  CastAs        // expr as Type
+  CastAs,       // expr as Type
+  SliceFrom     // arr[lo..hi]
 };
 
 struct Expr {

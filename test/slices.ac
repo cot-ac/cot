@@ -1,0 +1,29 @@
+// RUN: %cot test %s
+
+test "array to slice" {
+  let arr: [5]i32 = [10, 20, 30, 40, 50]
+  let s: []i32 = arr[0..5]
+  assert(s.len == 5)
+}
+
+test "slice element access" {
+  let arr: [3]i32 = [100, 200, 300]
+  let s: []i32 = arr[0..3]
+  assert(s[0] == 100)
+  assert(s[1] == 200)
+  assert(s[2] == 300)
+}
+
+test "sub-slice" {
+  let arr: [5]i32 = [10, 20, 30, 40, 50]
+  let s: []i32 = arr[1..4]
+  assert(s.len == 3)
+  assert(s[0] == 20)
+  assert(s[1] == 30)
+  assert(s[2] == 40)
+}
+
+test "string slice len" {
+  let s: []i8 = "hello"
+  assert(s.len == 5)
+}
