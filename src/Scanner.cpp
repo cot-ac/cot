@@ -64,6 +64,7 @@ static TokenKind lookupKeyword(llvm::StringRef word) {
       .Case("true", TokenKind::BoolTrue)
       .Case("false", TokenKind::BoolFalse)
       .Case("null", TokenKind::Null)
+      .Case("orelse", TokenKind::Orelse)
       .Case("struct", TokenKind::Struct)
       .Case("i8", TokenKind::I8)
       .Case("i16", TokenKind::I16)
@@ -286,6 +287,7 @@ Token Scanner::next() {
   case '%': kind = TokenKind::Percent; break;
   case '^': kind = TokenKind::Caret; break;
   case '~': kind = TokenKind::Tilde; break;
+  case '?': kind = TokenKind::Question; break;
   default: kind = TokenKind::Invalid; break;
   }
 

@@ -40,6 +40,7 @@ enum class TokenKind {
   Test,
   Assert,
   Null,
+  Orelse,
   Struct,
 
   // Types
@@ -91,6 +92,7 @@ enum class TokenKind {
   Shl,       // <<
   Shr,       // >>
   DotDot,    // ..
+  Question,  // ?
 };
 
 struct Token {

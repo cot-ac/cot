@@ -1,3 +1,4 @@
+// RUN: %cot build %s %t && %t; test $? -eq 42
 struct Rect {
     w: i32
     h: i32

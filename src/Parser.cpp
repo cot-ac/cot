@@ -13,6 +13,7 @@ namespace ac {
 // Zig pattern: operator precedence table.
 static int precedence(TokenKind kind) {
   switch (kind) {
+  case TokenKind::Orelse:                                return 5;
   case TokenKind::PipePipe:                              return 10;
   case TokenKind::AmpAmp:                                return 20;
   case TokenKind::EqEq: case TokenKind::BangEq:         return 30;
@@ -74,8 +75,15 @@ class ParserImpl {
   void skipSemis() { while (check(TokenKind::Semicolon)) advance(); }
 
   // ---- Type ----
-  // Handles: i32, Point (identifier), [N]T (array)
+  // Handles: i32, Point (identifier), [N]T (array), ?T (optional)
   TypeRef parseType() {
+    // Optional type: ?T
+    if (check(TokenKind::Question)) {
+      advance(); // ?
+      auto inner = parseType();
+      inner.isOptional = true;
+      return inner;
+    }
     // Array type: [N]T
     if (check(TokenKind::LBracket)) {
       advance(); // [
@@ -90,7 +98,7 @@ class ParserImpl {
       return t;
     }
     auto &tok = advance();
-    return TypeRef{tokenText(tok), 0, false};
+    return TypeRef{tokenText(tok), 0, false, false};
   }
 
   // ---- Expressions ----
@@ -139,6 +147,15 @@ class ParserImpl {
       // Strip quotes
       auto raw = tokenText(tok);
       e->strVal = raw.substr(1, raw.size() - 2);
+      return e;
+    }
+
+    // Null literal
+    if (tok.kind == TokenKind::Null) {
+      advance();
+      auto e = std::make_unique<Expr>();
+      e->kind = ExprKind::NullLit;
+      e->pos = tok.start;
       return e;
     }
 
@@ -244,9 +261,23 @@ class ParserImpl {
     return std::make_unique<Expr>();
   }
 
-  // Parse postfix: .field and [index]
+  // Parse postfix: .field, [index], and ! (force unwrap)
   ExprPtr parsePostfix(ExprPtr base) {
     while (true) {
+      // Force unwrap: expr!
+      if (check(TokenKind::Bang)) {
+        // Only treat ! as postfix if not followed by = (which is !=)
+        if (pos_ + 1 < tokens_.size() &&
+            peekAt(1).kind == TokenKind::Eq)
+          break;  // It's != operator, not force unwrap
+        auto &bangTok = advance();
+        auto e = std::make_unique<Expr>();
+        e->kind = ExprKind::ForceUnwrap;
+        e->pos = bangTok.start;
+        e->lhs = std::move(base);
+        base = std::move(e);
+        continue;
+      }
       if (check(TokenKind::Dot)) {
         advance(); // .
         auto &fieldTok = expect(TokenKind::Identifier);
@@ -366,6 +397,18 @@ class ParserImpl {
       return s;
     }
 
+    // assert(expr)
+    if (tok.kind == TokenKind::Assert) {
+      advance();
+      auto s = std::make_unique<Stmt>();
+      s->kind = StmtKind::Assert;
+      s->pos = tok.start;
+      expect(TokenKind::LParen);
+      s->expr = parseExpr();
+      expect(TokenKind::RParen);
+      return s;
+    }
+
     // while expr { ... }
     if (tok.kind == TokenKind::While) {
       advance();
@@ -476,6 +519,17 @@ class ParserImpl {
     return fn;
   }
 
+  TestDecl parseTestDecl() {
+    auto &testTok = expect(TokenKind::Test);
+    TestDecl td;
+    td.pos = testTok.start;
+    auto &nameTok = expect(TokenKind::StringLiteral);
+    auto raw = tokenText(nameTok);
+    td.name = raw.substr(1, raw.size() - 2); // strip quotes
+    td.body = parseBlock();
+    return td;
+  }
+
 public:
   ParserImpl(llvm::StringRef source, const llvm::SmallVector<Token> &tokens)
       : source_(source), tokens_(tokens) {}
@@ -488,8 +542,10 @@ public:
         mod.functions.push_back(parseFnDecl());
       } else if (check(TokenKind::Struct)) {
         mod.structs.push_back(parseStructDef());
+      } else if (check(TokenKind::Test)) {
+        mod.tests.push_back(parseTestDecl());
       } else {
-        llvm::errs() << "error: expected 'fn' or 'struct', got '"
+        llvm::errs() << "error: expected 'fn', 'struct', or 'test', got '"
                       << tokenText(peek()) << "'\n";
         advance();
       }

@@ -16,6 +16,9 @@
 #include "cot-arrays/Ops.h"
 #include "cot-slices/Types.h"
 #include "cot-slices/Ops.h"
+#include "cot-optionals/Types.h"
+#include "cot-optionals/Ops.h"
+#include "cot-test/Ops.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/Builders.h"
@@ -57,9 +60,16 @@ class CodeGenImpl {
   }
 
   Type resolveType(const TypeRef &t) {
+    // Optional type: ?T
+    if (t.isOptional) {
+      TypeRef inner{t.name, t.arrayLen, t.isArray, false};
+      auto innerType = resolveType(inner);
+      return cir::OptionalType::get(b.getContext(), innerType);
+    }
+
     // Array type: [N]T
     if (t.isArray) {
-      TypeRef elemRef{t.name, 0, false};
+      TypeRef elemRef{t.name, 0, false, false};
       auto elemType = resolveType(elemRef);
       return cir::ArrayType::get(b.getContext(), t.arrayLen, elemType);
     }
@@ -104,6 +114,15 @@ class CodeGenImpl {
   Value emitExpr(const Expr &e, Type expectedType = Type()) {
     loc = locFrom(e.pos);
 
+    // If expected type is optional and expr is not null, unwrap the
+    // expected type so the inner expression gets the right type context.
+    // The wrapping is handled at the call site (Let/Var).
+    if (expectedType && mlir::isa<cir::OptionalType>(expectedType) &&
+        e.kind != ExprKind::NullLit) {
+      expectedType = mlir::cast<cir::OptionalType>(expectedType)
+                         .getPayloadType();
+    }
+
     switch (e.kind) {
     case ExprKind::IntLit: {
       auto type = expectedType ? expectedType : b.getI32Type();
@@ -124,6 +143,25 @@ class CodeGenImpl {
       // Emit cir.string_constant → !cir.slice<i8>
       auto sliceType = cir::SliceType::get(b.getContext(), b.getIntegerType(8));
       return b.create<cir::StringConstantOp>(loc, sliceType, e.strVal);
+    }
+    case ExprKind::NullLit: {
+      // null → cir.none : !cir.optional<T> (needs expected type)
+      if (!expectedType || !mlir::isa<cir::OptionalType>(expectedType)) {
+        llvm::errs() << "error: null requires optional type context\n";
+        return Value();
+      }
+      return b.create<cir::NoneOp>(loc, expectedType);
+    }
+    case ExprKind::ForceUnwrap: {
+      // expr! → cir.optional_payload
+      auto val = emitExpr(*e.lhs);
+      auto optType = mlir::dyn_cast<cir::OptionalType>(val.getType());
+      if (!optType) {
+        llvm::errs() << "error: force unwrap on non-optional type\n";
+        return val;
+      }
+      return b.create<cir::OptionalPayloadOp>(loc, optType.getPayloadType(),
+                                               val);
     }
     case ExprKind::Ident: {
       auto pit = params_.find(e.name);
@@ -243,6 +281,39 @@ class CodeGenImpl {
       return Value();
     }
     case ExprKind::BinOp: {
+      // orelse: expr orelse default → is_non_null ? payload : default
+      if (e.op == TokenKind::Orelse) {
+        auto lhs = emitExpr(*e.lhs);
+        auto optType = mlir::dyn_cast<cir::OptionalType>(lhs.getType());
+        if (!optType) {
+          llvm::errs() << "error: orelse on non-optional type\n";
+          return lhs;
+        }
+        auto isNN = b.create<cir::IsNonNullOp>(loc, b.getI1Type(), lhs);
+        auto payload = b.create<cir::OptionalPayloadOp>(
+            loc, optType.getPayloadType(), lhs);
+        auto rhs = emitExpr(*e.rhs, optType.getPayloadType());
+        return b.create<cir::SelectOp>(
+            loc, optType.getPayloadType(), isNN, payload, rhs);
+      }
+
+      // Null comparisons: expr == null, expr != null → is_non_null
+      if ((e.op == TokenKind::EqEq || e.op == TokenKind::BangEq) &&
+          (e.rhs->kind == ExprKind::NullLit ||
+           e.lhs->kind == ExprKind::NullLit)) {
+        // Determine which side is the optional
+        auto &optExpr = (e.lhs->kind == ExprKind::NullLit) ? *e.rhs : *e.lhs;
+        auto val = emitExpr(optExpr);
+        auto isNN = b.create<cir::IsNonNullOp>(loc, b.getI1Type(), val);
+        // == null → NOT is_non_null; != null → is_non_null
+        if (e.op == TokenKind::EqEq) {
+          auto one = b.create<cir::ConstantOp>(
+              loc, b.getI1Type(), b.getBoolAttr(true));
+          return b.create<cir::BitXorOp>(loc, b.getI1Type(), isNN, one);
+        }
+        return isNN;
+      }
+
       // Comparison ops produce i1
       if (e.op == TokenKind::EqEq || e.op == TokenKind::BangEq ||
           e.op == TokenKind::Less || e.op == TokenKind::LessEq ||
@@ -320,8 +391,21 @@ class CodeGenImpl {
     }
     case StmtKind::Let:
     case StmtKind::Var: {
-      auto val = emitExpr(*s.expr);
+      // If type annotation is optional, resolve it and use for context
+      Type declaredType;
+      if (s.varType.name.size())
+        declaredType = resolveType(s.varType);
+
+      auto val = emitExpr(*s.expr, declaredType);
       auto type = val.getType();
+
+      // Implicit wrap: assigning non-optional value to optional variable
+      if (declaredType && mlir::isa<cir::OptionalType>(declaredType) &&
+          !mlir::isa<cir::OptionalType>(type)) {
+        val = b.create<cir::WrapOptionalOp>(loc, declaredType, val);
+        type = declaredType;
+      }
+
       auto ptrType = cir::PointerType::get(b.getContext());
       auto addr = b.create<cir::AllocaOp>(loc, ptrType,
                                             TypeAttr::get(type));
@@ -430,6 +514,15 @@ class CodeGenImpl {
       b.setInsertionPointToStart(exitBlock);
       break;
     }
+    case StmtKind::Assert: {
+      auto cond = emitExpr(*s.expr);
+      // Generate diagnostic message from source location + expression text
+      auto [line, col] = lineCol(s.pos);
+      std::string msg = filename_ + ":" + std::to_string(line) +
+                        ": assertion failed";
+      b.create<cir::AssertOp>(loc, cond, b.getStringAttr(msg));
+      break;
+    }
     case StmtKind::ExprStmt:
       emitExpr(*s.expr);
       break;
@@ -507,12 +600,34 @@ public:
     b.setInsertionPointToEnd(module_.getBody());
   }
 
+  void emitTestDecl(const TestDecl &td) {
+    loc = locFrom(td.pos);
+
+    // Create cir.test_case "name" { body }
+    auto testOp = b.create<cir::TestCaseOp>(loc, td.name);
+    auto *bodyBlock = new Block();
+    testOp.getBody().push_back(bodyBlock);
+    b.setInsertionPointToStart(bodyBlock);
+
+    // Reset scope for test isolation
+    locals_.clear();
+    params_.clear();
+
+    for (auto &s : td.body)
+      emitStmt(*s);
+
+    // cir.test_case has NoTerminator — no terminator needed
+    b.setInsertionPointToEnd(module_.getBody());
+  }
+
   ModuleOp emit(const Module &mod) {
     // Register struct types first (so functions can reference them)
     for (auto &sd : mod.structs)
       emitStructDef(sd);
     for (auto &fn : mod.functions)
       emitFnDecl(fn);
+    for (auto &td : mod.tests)
+      emitTestDecl(td);
     return module_;
   }
 };

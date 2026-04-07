@@ -1,3 +1,4 @@
+// RUN: %cot build %s %t && %t; test $? -eq 42
 fn main() -> i32 {
     let x: i32 = 10
     var y: i32 = 20

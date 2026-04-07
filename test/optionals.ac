@@ -1,0 +1,29 @@
+// RUN: %cot test %s
+
+fn unwrap_or_default(x: ?i32) -> i32 {
+  return x orelse 0
+}
+
+test "wrap and force unwrap" {
+  let a: ?i32 = 42
+  let val: i32 = a!
+  assert(val == 42)
+}
+
+test "null and orelse" {
+  let b: ?i32 = null
+  let c: i32 = b orelse 10
+  assert(c == 10)
+}
+
+test "unwrap_or_default with null" {
+  let b: ?i32 = null
+  let d: i32 = unwrap_or_default(b)
+  assert(d == 0)
+}
+
+test "unwrap_or_default with value" {
+  let a: ?i32 = 42
+  let d: i32 = unwrap_or_default(a)
+  assert(d == 42)
+}

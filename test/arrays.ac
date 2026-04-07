@@ -1,3 +1,4 @@
+// RUN: %cot build %s %t && %t; test $? -eq 42
 fn sum3(a: i32, b: i32, c: i32) -> i32 {
     return a + b + c
 }

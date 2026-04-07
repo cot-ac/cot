@@ -21,6 +21,7 @@ struct TypeRef {
   llvm::StringRef name;    // "i32", "void", "Point", etc.
   int64_t arrayLen = 0;    // >0 for [N]T array types
   bool isArray = false;    // true for [N]T
+  bool isOptional = false; // true for ?T
 };
 
 struct Param {
@@ -35,11 +36,12 @@ struct FieldInit {
 };
 
 enum class ExprKind {
-  IntLit, FloatLit, BoolLit, StringLit, Ident, BinOp, UnaryOp, Call,
-  StructLit,   // Point { x: 1, y: 2 }
-  FieldAccess, // expr.field
-  ArrayLit,    // [1, 2, 3]
-  Index        // expr[expr]
+  IntLit, FloatLit, BoolLit, StringLit, NullLit, Ident, BinOp, UnaryOp, Call,
+  StructLit,    // Point { x: 1, y: 2 }
+  FieldAccess,  // expr.field
+  ArrayLit,     // [1, 2, 3]
+  Index,        // expr[expr]
+  ForceUnwrap   // expr!
 };
 
 struct Expr {
@@ -58,7 +60,7 @@ struct Expr {
 };
 
 enum class StmtKind {
-  Return, ExprStmt, If, While, Let, Var, Assign, CompoundAssign
+  Return, ExprStmt, If, While, Let, Var, Assign, CompoundAssign, Assert
 };
 
 struct Stmt {
@@ -86,9 +88,16 @@ struct FnDecl {
   size_t pos;
 };
 
+struct TestDecl {
+  llvm::StringRef name;          // test "name" → "name"
+  llvm::SmallVector<StmtPtr> body;
+  size_t pos;
+};
+
 struct Module {
   llvm::SmallVector<StructDef> structs;
   llvm::SmallVector<FnDecl> functions;
+  llvm::SmallVector<TestDecl> tests;
 };
 
 Module parse(llvm::StringRef source, const llvm::SmallVector<Token> &tokens);
