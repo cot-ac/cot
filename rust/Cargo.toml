@@ -9,5 +9,8 @@ name = "cot"
 path = "src/main.rs"
 
 [dependencies]
-mlif = { workspace = true }
+mlif = { workspace = true, features = ["codegen"] }
 cot-dev = { path = "../../cot-dev/rust" }
+cot-arith = { path = "../../core/arith/rust" }
+cot-memory = { path = "../../core/memory/rust" }
+cot-flow = { path = "../../core/flow/rust" }
