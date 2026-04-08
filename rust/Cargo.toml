@@ -1,0 +1,13 @@
+[package]
+name = "cot"
+version = "0.1.0"
+edition = "2021"
+description = "cot — compiler for the ac language"
+
+[[bin]]
+name = "cot"
+path = "src/main.rs"
+
+[dependencies]
+mlif = { workspace = true }
+cot-dev = { path = "../../cot-dev/rust" }
