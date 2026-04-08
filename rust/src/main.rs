@@ -55,8 +55,22 @@ fn main() {
                 "a.out"
             };
 
+            // Build construct lowering registry
+            let mut registry = mlif::LoweringRegistry::new();
+            registry.register(Box::new(cot_arith::lowering::ArithLowering));
+            registry.register(Box::new(cot_memory::lowering::MemoryLowering));
+            registry.register(Box::new(cot_flow::lowering::FlowLowering));
+            registry.register(Box::new(cot_optionals::lowering::OptionalsLowering));
+            registry.register(Box::new(cot_errors::lowering::ErrorsLowering));
+            registry.register(Box::new(cot_structs::lowering::StructsLowering));
+            registry.register(Box::new(cot_arrays::lowering::ArraysLowering));
+            registry.register(Box::new(cot_enums::lowering::EnumsLowering));
+            registry.register(Box::new(cot_slices::lowering::SlicesLowering));
+            registry.register(Box::new(cot_test::lowering::TestLowering));
+            registry.register(Box::new(cot_unions::lowering::UnionsLowering));
+
             // Lower to Cranelift
-            let bytes = match mlif::codegen::lower_module(&ctx, module.op()) {
+            let bytes = match mlif::codegen::lower_module(&ctx, module.op(), Some(&registry)) {
                 Ok(b) => b,
                 Err(e) => {
                     eprintln!("error: lowering failed: {}", e);

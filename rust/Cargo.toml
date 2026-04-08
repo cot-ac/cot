@@ -11,6 +11,14 @@ path = "src/main.rs"
 [dependencies]
 mlif = { workspace = true, features = ["codegen"] }
 cot-dev = { path = "../../cot-dev/rust" }
-cot-arith = { path = "../../core/arith/rust" }
-cot-memory = { path = "../../core/memory/rust" }
-cot-flow = { path = "../../core/flow/rust" }
+cot-arith = { path = "../../core/arith/rust", features = ["codegen"] }
+cot-memory = { path = "../../core/memory/rust", features = ["codegen"] }
+cot-flow = { path = "../../core/flow/rust", features = ["codegen"] }
+cot-optionals = { path = "../../core/optionals/rust", features = ["codegen"] }
+cot-errors = { path = "../../core/errors/rust", features = ["codegen"] }
+cot-structs = { path = "../../core/structs/rust", features = ["codegen"] }
+cot-arrays = { path = "../../core/arrays/rust", features = ["codegen"] }
+cot-enums = { path = "../../core/enums/rust", features = ["codegen"] }
+cot-slices = { path = "../../core/slices/rust", features = ["codegen"] }
+cot-test = { path = "../../core/test/rust", features = ["codegen"] }
+cot-unions = { path = "../../core/unions/rust", features = ["codegen"] }

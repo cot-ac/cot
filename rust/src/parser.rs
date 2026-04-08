@@ -41,7 +41,7 @@ pub struct Param {
     pub ty: TypeRef,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FieldInit {
     pub name: String,
     pub value: Expr,
@@ -70,7 +70,7 @@ pub enum ExprKind {
     SliceFrom,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Expr {
     pub kind: ExprKind,
     pub pos: usize,
@@ -127,7 +127,7 @@ pub enum StmtKind {
     Match,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Stmt {
     pub kind: StmtKind,
     pub pos: usize,
@@ -857,7 +857,10 @@ impl<'a> Parser<'a> {
             self.expect(TokenKind::Colon);
             let ty = self.parse_type();
             fields.push(Param { name: field_name, ty });
-            self.skip_semis();
+            // Accept commas or semicolons (newlines) between fields.
+            if !self.match_tok(TokenKind::Comma) {
+                self.skip_semis();
+            }
         }
         self.expect(TokenKind::RBrace);
         StructDef { name, fields, pos: ss }
